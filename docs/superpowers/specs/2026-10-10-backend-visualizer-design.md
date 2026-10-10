@@ -64,7 +64,7 @@ fixtures/            small sample backends + expected model snapshots
 
 ### 3.2 analyzer-ts
 
-- Discovers services: each `package.json` in the workspace (excluding `node_modules`) is a candidate service; it is analyzed with its `tsconfig.json`, or with `allowJs` defaults if it has none, is a candidate service (monorepo support).
+- Discovers services: each `package.json` in the workspace (excluding `node_modules`) is a candidate service; it is analyzed with its `tsconfig.json`, or with `allowJs` defaults if it has none (monorepo support).
 - Loads each service with ts-morph.
 - **Detector interface**: `detect(ctx: AnalysisContext) => Partial<Model>`; detectors are independent and isolated.
 - v1 detectors:
