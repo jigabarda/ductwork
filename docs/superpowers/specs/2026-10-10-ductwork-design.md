@@ -1,8 +1,8 @@
-# archmap — Backend Architecture Visualizer & Explainer (Design)
+# Ductwork — Backend Architecture Visualizer & Explainer (Design)
 
 Date: 2026-10-10
 Status: Revised after review (2026-10-11), awaiting user approval
-Name: `archmap` is a placeholder; final product name decided later.
+Name: **Ductwork** (npm `ductwork` available; repo github.com/jigabarda/ductwork). VS Code Marketplace and domain availability to verify in M6.
 
 ## 1. Purpose
 
@@ -45,7 +45,7 @@ packages/
   explainer/         template explanations + AI adapter interface/impls
   viewer/            React app rendering the 4 views (webview + standalone export)
   vscode-extension/  commands, webview host, click-to-code, SecretStorage
-  cli/               `archmap scan --out model.json` (CI, tests)
+  cli/               `ductwork scan --out model.json` (CI, tests)
 fixtures/            small sample backends + expected model snapshots
 golden/              (private) expected results for author repos, accuracy script
 ```
@@ -350,7 +350,7 @@ Views:
 
 ### 3.6 Configuration
 
-VS Code settings (`archmap.*`) and an optional `archmap.config.json` at the workspace root share one schema, so the CLI and the extension behave the same. The file overrides settings.
+VS Code settings (`ductwork.*`) and an optional `ductwork.config.json` at the workspace root share one schema, so the CLI and the extension behave the same. The file overrides settings.
 
 | Key | Default | Purpose |
 |---|---|---|
@@ -383,7 +383,7 @@ VS Code settings (`archmap.*`) and an optional `archmap.config.json` at the work
 
 ### 3.8 cli
 
-- `archmap scan [dir] --out model.json` — reuses analyzer-ts. Used for CI smoke tests and fixtures; usable by anyone.
+- `ductwork scan [dir] --out model.json` — reuses analyzer-ts. Used for CI smoke tests and fixtures; usable by anyone.
 
 ## 4. Data flow
 
