@@ -155,19 +155,116 @@ interface ScanReport {
 
 ### 3.2 analyzer-ts
 
-- Discovers services: each `package.json` in the workspace (excluding `node_modules`) is a candidate service; it is analyzed with its `tsconfig.json`, or with `allowJs` defaults if it has none (monorepo support).
-- Loads each service with ts-morph.
-- **Detector interface**: `detect(ctx: AnalysisContext) => Partial<Model>`; detectors are independent and isolated.
-- v1 detectors:
-  - Frameworks: `express`, `fastify`, `nestjs`, `nextjs-api` (app & pages router route handlers)
-  - Data: `prisma` (schema.prisma → tables/relations; `prisma.x.find*/create*/...` → reads/writes), `drizzle` (table definitions; query builder calls)
-  - Outbound: `http-clients` (fetch, axios) and known SDKs (v1 list: Stripe, Resend, Supabase, AWS S3, OpenAI, Anthropic; list is a data table, easy to extend) → `external-api` nodes; unknown fetch/axios targets become `external-api` nodes named by host when the URL is a literal, otherwise `unresolved`
-  - Async: `bullmq` (queues, producers, workers), `redis` (ioredis/redis clients → cache)
-  - Structure: `imports` (module graph by folder)
-- **Call-chain resolution**: from each route handler, follow calls via the type checker across files up to depth 8; record paths reaching db/external/queue/cache nodes into `flows`. Unresolvable calls (dynamic dispatch, computed members) produce `unresolved` edges rather than guesses.
-- Output merged and written to `.archmap/model.json` in the workspace.
-- Incremental: on file save, re-analyze affected files and patch the model.
-- Never reads `.env*` files.
+#### Service discovery
+
+- Every `package.json` in the workspace (honoring `exclude` globs; `node_modules` always excluded) is a **package**.
+- A package is a **service** only if a framework detector finds an entrypoint or route in it; otherwise it is a **library**.
+- Explicit `services` roots in config override discovery.
+- Each package uses its `tsconfig.json`, or `config.tsconfig` if set (e.g. `tsconfig.build.json`), or `allowJs` defaults if it has none. tsconfig `paths` and project `references` are honored.
+- Workspace packages (`workspace:*`) resolve to their **source**, not `dist/`, through path mapping, so calls into shared libraries are followed.
+- **One ts-morph `Project` per workspace**, not one per package, so shared code is loaded once.
+
+#### Detector contract (two phases)
+
+```ts
+interface Detector {
+  name: string;
+  owns: NodeKind[];                                   // e.g. prisma owns 'db-table'
+  appliesTo(pkg: PackageInfo): boolean;               // dependency check in package.json
+  discover(ctx: AnalysisContext): { nodes: Node[]; edges: Edge[] };   // phase 1
+  classifyCall?(call: CallExpression, checker: TypeChecker): SinkMatch | WrapperMatch | null; // phase 2
+}
+type SinkMatch = { kind: 'sink'; nodeId: string; edgeKind: 'reads' | 'writes' | 'calls' | 'publishes'; confidence: Confidence };
+type WrapperMatch = { kind: 'wrapper'; unwrapArg: number };   // e.g. asyncHandler(fn) -> follow arg 0
+```
+
+- **Phase 1 (`discover`)**: every detector runs independently and in isolation. Order does not matter.
+- **Phase 2 (call-chain resolution)**: the resolver asks every detector's `classifyCall` about each call expression it visits.
+- **Merge rules**:
+  - Same node `id` from two detectors → `meta` is unioned and the owning detector wins on conflicts.
+  - Same edge `id` → the highest confidence is kept.
+  - Nodes of a kind are created only by the detector that `owns` it; others reference them by id.
+
+#### v1 detectors
+
+**Frameworks.** Each must compute the **full path** through mount/prefix composition. A non-literal prefix gives `pathConfidence: 'unresolved'`.
+
+- `express`: `app.METHOD`, `router.METHOD`, `router.route()`, nested `app.use('/prefix', router)`, and middleware (`app.use(mw)` global, `router.use` router-scoped, inline route middleware).
+- `fastify`: `fastify.METHOD`, `route()`, `register(plugin, { prefix })` composed recursively, and the hooks `onRequest`/`preHandler` as middleware.
+- `nestjs`:
+  - Routes: `@Controller(prefix)` + method decorators, `setGlobalPrefix`, URI versioning.
+  - Middleware: guards, interceptors and pipes, and `consumer.apply().forRoutes()`.
+  - Dependency injection: a provider map is built from `@Module` metadata (`providers`, `useClass`, `useFactory`, `useExisting`, `@Inject(TOKEN)`), so injected tokens resolve to concrete classes. Unmapped tokens are `unresolved`.
+  - Nest `@Module`s become `module` nodes.
+- `nextjs-api`:
+  - App router `app/**/route.ts` (exported `GET`/`POST`/…) and pages router `pages/api/**`.
+  - Path rules:
+    - `(group)` segments are dropped
+    - `[id]` becomes `:id`
+    - `[...slug]` becomes `:slug*`
+    - `[[...slug]]` becomes `:slug*?`
+    - `@slot` and `_private` folders are ignored
+    - `basePath` from `next.config.*` applies when it is a literal
+  - `middleware.ts` is global middleware, with its `matcher` recorded.
+
+**Middleware roles.** `role` is detected from known packages: auth (passport, jsonwebtoken, next-auth, clerk, `@nestjs/passport` guards), validation (zod, joi, class-validator, ValidationPipe), rate limiting, cors, helmet, and logging (morgan, pino-http). Anything else is `other`.
+
+**Data.**
+
+- `prisma`:
+  - `schema.prisma` is parsed with `@mrleebo/prisma-ast` into tables, columns, enums, indexes, and relations with cardinality and `onDelete`.
+  - Calls to `prisma.<model>.find*|count|aggregate|groupBy` are `reads`. `create*|update*|upsert|delete*` are `writes`. `$queryRaw`/`$executeRaw` produce an `unresolved` edge to the datasource.
+- `drizzle`:
+  - `pgTable`/`mysqlTable`/`sqliteTable` definitions are read through ts-morph.
+  - Foreign keys come from `.references()`. `relations()` adds cardinality.
+  - If the two disagree, `.references()` wins and the relation edge is `inferred`.
+  - `db.select().from(t)` is a read. `insert`/`update`/`delete` are writes.
+
+**Outbound.**
+
+- `http-clients` (fetch, axios, got, ky) and a data table of known SDKs (v1: Stripe, Resend, Supabase, AWS S3, OpenAI, Anthropic) produce `external-api` nodes.
+- A literal URL becomes `ext:host:{host}`, with credentials and query strings stripped. A non-literal URL is `unresolved`.
+- **Cross-service matching:** when a literal host or path matches another detected service's route (localhost ports, a docker-compose service name, or `config.serviceHosts`), `matchedServiceId` is set and the system map draws a service→service edge.
+
+**Async.**
+
+- `bullmq`: `new Queue(name)` is a queue node, `queue.add` publishes, and `new Worker(name, fn)` consumes. The worker fn is analyzed as a flow root. Dynamic names are `unresolved`.
+- `redis`: one cache node per client instance (`new Redis(...)`/`createClient`), labeled by variable name.
+
+**Structure.**
+
+- `imports` builds the module graph at folder granularity set by `config.moduleDepth` (default: 2 levels under `src/`).
+- Cycles are detected at **file level** and shown rolled up to folders. A folder edge is marked cyclic only if a file-level cycle crosses it.
+
+**Unsupported frameworks.** If `package.json` lists koa, hapi, @trpc/server, graphql/apollo-server, typeorm, sequelize, mongoose or knex, the scan report shows "detected, not yet supported".
+
+#### Call-chain resolution
+
+- **Roots:** each route handler (with its middleware chain prepended) and each BullMQ worker fn.
+- **Per-function summaries, memoized:** each function is analyzed once into `{ callees in source order (with branch context), sink matches }`. Flows are composed from these summaries, so shared service and repository layers aren't walked again for every route.
+- **Resolution:**
+  - Calls go through the type checker to the declaration.
+  - A call to an interface or abstract method goes to its single implementation if there is exactly one in the workspace (`inferred`). With more than one, the edge is `unresolved` and lists the candidates.
+  - NestJS injections go through the provider map.
+  - Known wrappers (detector `WrapperMatch`: `asyncHandler`, `catchAsync`, `validate(schema)(fn)`, Nest `@UseGuards`) are unwrapped.
+  - Callbacks passed as arguments are followed when they are function literals or identifiers that resolve.
+- **Stops:**
+  - Depth `config.maxDepth` (default 8) → `truncated: 'depth'`.
+  - A cycle (function already on the stack) → `truncated: 'cycle'`.
+  - Any declaration in `node_modules` or a `.d.ts` file (unless a detector classifies it as a sink) → `truncated: 'node_modules'`.
+  - Dynamic dispatch or computed members → an `unresolved` step.
+- **Budget:** ≤ 60 s and ≤ 1.5 GB RSS for a 1,000-file service on a typical laptop. The analyzer runs in a **child process** with `--max-old-space-size` set from config (default 2048). If the budget is exceeded, it stops resolving and returns a partial model with `limitsHit` recorded.
+
+#### Output
+
+- The model is validated against the schema and written to the extension's `workspaceState` storage (`context.storageUri`), not into the repo.
+- The CLI writes it to `--out`.
+- `.env*` files are never read.
+
+#### Re-scan (v1: not truly incremental)
+
+- On save (debounced 2 s), the **affected service** is re-analyzed in full, reusing the cached ts-morph `Project`, which is refreshed for the changed files. The new result replaces that service's slice of the model.
+- Fine-grained incremental patching (file ownership plus reverse-dependency invalidation) is deferred until after v1.
 
 ### 3.3 explainer
 
