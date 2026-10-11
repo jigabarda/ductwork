@@ -372,6 +372,10 @@ VS Code settings (`ductwork.*`) and an optional `ductwork.config.json` at the wo
 | `ai.provider` / `ai.model` / `ai.baseUrl` | none / provider default / localhost for Ollama | AI settings (keys live in SecretStorage, never in the file) |
 | `ai.includeSnippets` | true | Send code snippets or the model only |
 | `ai.maxContextTokens` | 12000 | Payload cap |
+| `cacheDir` | `.ductwork/cache` (CLI/MCP; the CLI creates `.ductwork/.gitignore` with `*`) | Where the CLI and MCP server keep the model |
+| `rules` | built-in levels (see 3.10) | Rule levels for `ductwork check` |
+| `publicRoutes` | `[]` | Route globs exempt from `route-without-auth` (e.g. `GET /api/health`) |
+| `sensitiveTables` | `[]` | Tables that trigger `sensitive-table-access` |
 
 ### 3.7 Privacy & data inventory
 
@@ -511,34 +515,102 @@ Hand-written golden expectations for the author's repos (Pingward first, then Sa
 - ≥ 90% of sink edges present across 10 hand-picked key flows
 - 0 false sinks
 
-## 7. Scope
+## 7. Scope and milestones
 
-### In v1
+### In v1 (across M1 to M8)
 
-- 4 views; Express, Fastify, NestJS and Next.js API, with middleware and route composition; Prisma and Drizzle; fetch/axios/known SDKs; BullMQ and Redis; imports graph
+- 4 views; Next.js API, Express, Fastify and NestJS with middleware and route composition; Prisma and Drizzle; fetch/axios/known SDKs; BullMQ and Redis; imports graph
+- CLI (`scan`, `diff`, `check`, `mcp`) and standalone HTML export
+- MCP server for AI coding agents
+- PR architecture checks plus GitHub Action, with licensing for private repos
+- VS Code extension
 - Template explanations with glossary; optional AI (Claude, OpenAI, Ollama)
-- HTML/JSON export; CLI; configuration; VS Code Marketplace release (MIT license)
+- Configuration; npm and Marketplace releases (MIT for all open-source packages)
 
-### Milestones (each gets its own implementation plan)
+### Milestones (startup order; each gets its own implementation plan)
 
-The order tackles the riskiest part, call-chain accuracy, first.
+The order is: prove accuracy on real code, prove demand, then build what people pay for, then broaden.
 
-1. **M1 Core + Express/Prisma:**
-   - core-model types and schema, analyzer skeleton, service discovery, two-phase detector contract, call-chain resolver, CLI
-   - `express` and `prisma` detectors
-   - **Exit gate:** fixtures pass, and the golden accuracy check passes on Pingward (if Pingward isn't Express/Prisma, on whichever author repo is).
-2. **M2 Viewer (standalone):** system map, request flow, ERD and module graph rendered from fixture models; standalone HTML export with safe embedding.
-3. **M3 VS Code extension:** scan command and child process, webview with CSP, click-to-code, export, re-scan on save, config.
-4. **M4 Remaining detectors:** fastify, nestjs (with DI), nextjs-api, drizzle, http/SDKs with cross-service matching, bullmq, redis, imports cycles. **Exit gate:** golden check on Safeship.
-5. **M5 Explainer:** templates and glossary, then the AI adapters (Claude, OpenAI, Ollama) with payload builder, redaction and preview.
-6. **M6 Release:** packaging, Workspace Trust, README with screenshots, Marketplace listing, final name check.
+1. **M1 Validation build: engine + CLI + HTML.** Includes:
+   - Monorepo setup and core-model types/schema
+   - Analyzer skeleton with service/library discovery (workspace packages resolved to source)
+   - Two-phase detector contract and call-chain resolver
+   - Detectors: **`nextjs-api`** (including `middleware.ts`), **`prisma`**, `http-clients`/SDKs, `imports`
+   - Standalone viewer with all 4 views
+   - `ductwork scan --html`, published to npm
 
-### Later (not v1)
+   **Exit gate:** fixtures pass, and the golden accuracy check passes on **Pingward and Safeship** (both Next.js + Prisma).
+2. **M2 Validate demand.** Mostly non-code, tracked as issues:
+   - Landing page with an email list
+   - A public gallery of maps for 15 to 20 popular open-source Next.js + Prisma repos
+   - A demo video, a launch post (Show HN, r/nextjs, X)
+   - 15 interviews with engineering leads
 
-- v1.1: **Guided tours / teaching mode**, with step-by-step walkthroughs of a request flow
+   **Gate:** the section 8 metrics. If the gate fails, we pivot or stop.
+3. **M3 MCP server.** `ductwork mcp` with the 3.9 tools, plus install docs for Claude Code and Cursor. It's cheap to build and spreads through AI-agent users.
+4. **M4 PR architecture checks.** `packages/diff`, `ductwork diff` and `ductwork check`, the rules engine, the GitHub Action with a sticky comment, and offline-signed design-partner keys.
+
+   **Gate:** at least 3 design partners running it on a private repo.
+5. **M5 VS Code extension.** Scan in a child process, webview with CSP, click-to-code, export, re-scan on save, config, Workspace Trust.
+6. **M6 More detectors:**
+   - `express`, `fastify`, `nestjs` (with DI), `drizzle`, `bullmq`, `redis`, cross-service matching
+   - The unsupported-framework report
+
+   **Exit gate:** fixtures pass, and the real-repo smoke test runs on 3 public repos (Express, Nest, Fastify).
+7. **M7 Explainer:** templates and glossary first, then the AI adapters (Claude, OpenAI, Ollama) with payload builder, redaction and preview.
+8. **M8 Monetize and release:**
+   - License endpoint and billing (Stripe) for private-repo PR checks
+   - Pricing page, Marketplace listing, README with screenshots
+   - Final domain and Marketplace name check
+
+### Later (after v1)
+
+- **Guided tours / teaching mode**, with step-by-step walkthroughs of a request flow
 - Fine-grained incremental analysis
+- Hosted architecture history per repo and team dashboards
 - Python analyzer (FastAPI, Django, Flask, SQLAlchemy), then Go and Java
 - tRPC, GraphQL, TypeORM and Mongoose detectors
-- Hosted share links, accounts, team spaces
-- Architecture diff between commits/PRs
 - JetBrains plugin, desktop app, mobile viewer
+
+## 8. Startup strategy
+
+**Problem.** Engineers joining or changing a backend can't see how requests flow, where data is written, or which outside services are involved. Reviewers can't see when a PR changes that architecture, for example by adding a route without auth, sending data to a new third party, or writing to a sensitive table.
+
+**Target customer (first).** Small-to-mid engineering teams (5 to 50 engineers) with TypeScript backends (Next.js, Nest, Express) on GitHub. Users are developers and reviewers; the buyer is the engineering lead or CTO.
+
+**Competition and differentiation:**
+
+| Alternative | Gap Ductwork fills |
+|---|---|
+| DeepWiki, Google Code Wiki, GitDiagram (free, AI-generated, cloud) | Ductwork is local-first (no code upload) and deterministic (no hallucinated edges, explicit confidence), and it understands backends (routes → middleware → DB → externals). |
+| AppMap (runtime recording, about $50/month for 5 users) | Ductwork needs no running app or test suite; it works on static code in seconds. |
+| Coding agents explaining code on request | Ductwork gives them exact facts through MCP, so it complements them. |
+| CodeSee (shut down, acquired 2024): visualization alone didn't sell | Ductwork charges for **PR checks in the workflow**; diagrams are the free entry point. |
+
+**Business model (open core):**
+
+- **Free (MIT):** CLI, HTML export, MCP server, VS Code extension, and PR checks on public repos.
+- **Paid: PR architecture checks on private repos.** Pricing hypothesis: **$15/active committer/month**, or $49/month per repo for small teams. It will be tested in M2 interviews and with M4 design partners.
+- **Later paid:** hosted architecture history, team dashboards, compliance exports (data-flow maps of personal data for SOC 2/GDPR). This last one overlaps with Safeship, which should be revisited as a possible bundle.
+
+**Distribution:**
+
+- The public gallery of maps for popular open-source repos.
+- `npx ductwork scan --html`, which works in one command.
+- MCP listings for Claude Code and Cursor.
+- VS Code Marketplace.
+- The GitHub Action, which shows a PR comment to every reviewer on the team.
+
+**Validation metrics (M2 gate, about 4 weeks after the M1 launch):**
+
+- ≥ 300 email signups or ≥ 500 GitHub stars
+- ≥ 50 people run `npx ductwork scan` (counted by npm downloads; no telemetry in the tool)
+- Of 15 interviews:
+  - ≥ 8 say PR architecture checks would be useful
+  - ≥ 3 agree to be design partners on a private repo
+
+**Pivot/stop rule.** If fewer than half of these are met:
+
+- Interview the people who did try it.
+- Consider pivoting to the compliance and data-flow angle, or to MCP-only.
+- Otherwise, keep Ductwork as an open-source and portfolio project.
