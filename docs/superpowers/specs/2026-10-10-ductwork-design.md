@@ -47,12 +47,16 @@ packages/
   explainer/         template explanations + AI adapter interface/impls
   viewer/            React app rendering the 4 views (webview + standalone export)
   vscode-extension/  commands, webview host, click-to-code, SecretStorage
-  cli/               `ductwork scan --out model.json` (CI, tests)
+  cli/               `ductwork scan | diff | check | mcp`
+  diff/              model-to-model diff + architecture rules engine (PR checks)
+  mcp-server/        MCP server exposing the model to AI coding agents
+  github-action/     runs `ductwork check` on PRs, posts a summary comment
 fixtures/            small sample backends + expected model snapshots
-golden/              (private) expected results for author repos, accuracy script
+scripts/golden.ts    accuracy script; golden expectations live OUTSIDE this public repo
+                     (path passed via DUCTWORK_GOLDEN_DIR)
 ```
 
-**The Architecture Model is the contract.** Analyzers produce it; viewer and explainer consume it. A future `analyzer-py` emits the same model; nothing downstream changes.
+**The Architecture Model is the contract.** Analyzers produce it; the viewer, explainer, diff engine and MCP server consume it. A future `analyzer-py` emits the same model; nothing downstream changes.
 
 ### 3.1 core-model
 
@@ -385,7 +389,69 @@ VS Code settings (`ductwork.*`) and an optional `ductwork.config.json` at the wo
 
 ### 3.8 cli
 
-- `ductwork scan [dir] --out model.json` — reuses analyzer-ts. Used for CI smoke tests and fixtures; usable by anyone.
+Published to npm as `ductwork` (`npx ductwork …`).
+
+- `ductwork scan [dir] [--out model.json] [--html map.html] [--include-paths]` runs analyzer-ts.
+  - `--html` writes the standalone viewer export (same safety rules as 3.4; paths stripped unless `--include-paths`).
+  - This is the **validation build's** main entry point.
+- `ductwork diff <base.json> <head.json> [--format md|json]` prints the architecture diff (see 3.10).
+- `ductwork check [--base <git-ref>] [--rules ductwork.config.json]`:
+  - Scans HEAD, scans the base ref in a temporary `git worktree`, diffs the two and evaluates the rules.
+  - Exits non-zero on an `error`-level violation.
+- `ductwork mcp [dir]` starts the MCP server over stdio (see 3.9).
+- Exit codes: 0 ok, 1 rule violation, 2 scan failure, 3 bad usage.
+
+### 3.9 MCP server
+
+- **Purpose:** gives AI coding agents (Claude Code, Cursor, and others) exact architecture facts instead of guesses.
+- **Distribution:** listed as a one-line install for those tools.
+- **Transport:** stdio. It is started by the agent with `npx ductwork mcp`.
+- **Startup:** it loads the cached model (`.ductwork/cache`, or the extension storage when that path is configured) or runs a scan. It re-scans the affected service on file change (same rule as the extension re-scan).
+- **Tools (read-only), all returning JSON slices of the model:**
+  - `list_services()`
+  - `list_routes(serviceId?)`
+  - `get_flow(routeId | "METHOD /path")` returns the call tree with middleware
+  - `get_table(name)` returns columns, relations, and the routes that read or write it
+  - `find_usages(nodeId)` returns callers/routes reaching a function or sink
+  - `get_external_services()`
+  - `search(query)` matches node names
+- **Privacy:** it only returns model data, never source code. The agent can read the source itself if it wants.
+
+### 3.10 PR architecture checks (paid tier candidate)
+
+**Diff (`packages/diff`)** compares two models by stable IDs:
+
+- Nodes and edges are added or removed by ID.
+- A node is changed when its `meta` changed.
+- A flow is changed when the set of sink edges or the middleware changed.
+- Anonymous-function IDs are excluded from "changed" noise.
+
+**Built-in rules.** Each rule's level (`off | warn | error`) is set in config:
+
+| Rule | Triggers when |
+|---|---|
+| `route-without-auth` | A new or changed route has no middleware step with `role: 'auth'` and doesn't match `publicRoutes` globs |
+| `new-external-service` | A new `external-api` node appears |
+| `new-table-writer` | A route or worker starts writing a table it didn't write before |
+| `sensitive-table-access` | A new flow reaches a table listed in `sensitiveTables` (for PII and compliance) |
+| `new-cycle` | A new module-level import cycle |
+| `removed-route` | A route disappears (possible breaking change) |
+| `unresolved-increase` | The count of unresolved edges grows by more than N |
+
+**Output:**
+
+- A markdown summary: routes, tables, externals and flows that changed, plus violations.
+- An optional Mermaid snippet of changed flows, so diagrams appear in the PR comment.
+
+**GitHub Action (`packages/github-action`):**
+
+- Runs `ductwork check` on `pull_request` and updates one sticky comment.
+- **Source stays in the customer's CI runner.** Only for a paid private-repo license check does a license key and repo id leave CI, never the model.
+
+**Licensing:**
+
+- Free for public repos.
+- On private repos, the action requires a `DUCTWORK_LICENSE_KEY` (verified against a minimal license endpoint built in M8). Until M8, design partners get free keys that are validated offline (signed tokens).
 
 ## 4. Data flow
 
