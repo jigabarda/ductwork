@@ -257,7 +257,7 @@ type WrapperMatch = { kind: 'wrapper'; unwrapArg: number };   // e.g. asyncHandl
 
 #### Output
 
-- The model is validated against the schema and written to the extension's `workspaceState` storage (`context.storageUri`), not into the repo.
+- The model is validated against the schema and written to the extension's per-workspace storage folder (`context.storageUri`), not into the repo.
 - The CLI writes it to `--out`.
 - `.env*` files are never read.
 
@@ -268,12 +268,35 @@ type WrapperMatch = { kind: 'wrapper'; unwrapArg: number };   // e.g. asyncHandl
 
 ### 3.3 explainer
 
-- **Templates** generate plain-English text from model slices, e.g. "`POST /orders` is handled by `createOrder` in `orders.controller.ts`. It validates input, writes to the `orders` table, and calls Stripe." Available for every node kind and every flow. Deterministic and offline.
-- **AI adapter interface**: `explain(request: { modelSlice, snippets, question? }) => AsyncIterable<string>`.
-  - Implementations: Claude, OpenAI, Ollama.
-  - Keys stored in VS Code SecretStorage; Ollama needs only a base URL.
-- **Payload builder**: assembles the model slice and the minimum relevant code snippets; redacts secret-looking strings (high-entropy tokens, known key prefixes). The user sees an exact **preview** and confirms before anything is sent.
-- AI features: richer narration of a node/flow, and free-form Q&A about the architecture.
+**Templates**
+
+- Templates turn model slices into plain-English text and **only state facts the model contains**.
+- Example: "`POST /api/orders` passes through `requireAuth` (auth) and `validateBody` (validation), is handled by `OrdersController.create` in `orders.controller.ts`, writes to the `orders` table, and calls Stripe."
+- Every node kind and every flow has a template. Templates are deterministic and work offline.
+- **Teaching support in v1:** each node kind and middleware role links to a short built-in glossary entry ("What is middleware?", "What is a foreign key?", "Why use a queue?"). Full guided tours come in v1.1.
+
+**AI adapters**
+
+- Interface: `explain(request: { modelSlice, snippets, question? }) => AsyncIterable<string>`.
+- Implementations: Claude, OpenAI, Ollama. The provider and model are chosen in settings.
+- Keys are stored in VS Code SecretStorage.
+- Ollama's base URL defaults to `http://localhost:11434`. A non-loopback host shows a warning that data will leave the machine.
+
+**Payload builder**
+
+- **Model slice:**
+  - For a node or flow question: the node or flow plus neighbors one hop away.
+  - For free-form Q&A: the service summary (routes, tables, externals) plus nodes whose names match the question's keywords.
+  - The slice is capped at `config.ai.maxContextTokens` (default 12k).
+- **Snippets (optional, on by default; `config.ai.includeSnippets`):**
+  - For each function in the slice, the function body, capped at 80 lines each and 400 lines total.
+  - Turning snippets off gives model-only AI.
+- **Redaction (best-effort, stated in the UI):**
+  - Strings that look like secrets are replaced with `[REDACTED]`: high-entropy tokens, known key prefixes (`sk-`, `pk_live_`, `AKIA`, `ghp_`, `xox`), JWTs, connection strings and URL credentials.
+  - The same redactor runs on the **model** during analysis (see 3.2).
+- **Preview:** shows the exact payload, the provider and the host, and an approximate token count. Nothing is sent until the user confirms.
+- **Features:** richer narration of a node or flow, and free-form Q&A about the architecture.
+- **Workspace Trust:** AI is disabled in untrusted workspaces.
 
 ### 3.4 viewer
 
@@ -286,19 +309,76 @@ Views:
 3. **Data model (ERD)** — tables, columns, relations from Prisma/Drizzle.
 4. **Module dependency graph** — folders/modules and import edges; cycles highlighted.
 
-- Graphs: React Flow with ELK auto-layout. Request flow: custom sequence renderer.
-- Edge styling by confidence (dashed = unresolved). "Unknowns" panel lists unresolved edges.
-- Large graphs (> ~300 nodes) collapse by service/folder; expand on click.
-- Side panel: selected node's template explanation + "Ask AI" (extension host only).
-- Host bridge abstraction: `openLocation(file, line)`, `askAi(...)` — implemented by the extension; no-ops / hidden in standalone export.
+- **Rendering:** graphs use React Flow with ELK auto-layout. The request flow uses a custom sequence renderer driven by the `Flow` call tree; branches are drawn as alt/opt frames.
+- **Confidence:** edges are styled by confidence (dashed = unresolved), and an "Unknowns" panel lists unresolved edges and truncated steps.
+- **Large graphs:** graphs with more than `config.maxVisibleNodes` (default 300) nodes collapse by service or folder and expand on click.
+- **Side panel:** shows the selected node's template explanation, glossary link and "Ask AI". "Ask AI" is available in the extension host only.
+- **Host bridge:** `openLocation(file, line)` and `askAi(...)` are implemented by the extension. In the standalone export they are hidden.
+- **Security:** all model strings are untrusted input from the analyzed repo. They are rendered as text only, never with `dangerouslySetInnerHTML` or as HTML labels.
+
+#### Viewer build & CSP
+
+- **Bundling:** Vite builds one JS bundle and one CSS bundle. ELK runs in a Web Worker built from `elkjs/lib/elk-worker.min.js`.
+- **Webview:**
+  - CSP: `default-src 'none'; script-src 'nonce-…'; style-src ${webview.cspSource} 'unsafe-inline'; worker-src blob:; img-src ${webview.cspSource} data:`
+  - `localResourceRoots` is limited to the extension's `dist/viewer`.
+  - The worker is loaded through a blob URL.
+- **Export:**
+  - JS, CSS and the worker source are inlined into the HTML; the worker is created from a blob.
+  - The model is embedded as `<script type="application/json" id="model">`, with `<`, `>`, `&`, U+2028 and U+2029 escaped as `\uXXXX`.
+  - Budget: ≤ 3 MB HTML for a 1,000-node model.
+- **Theming:** the webview follows VS Code theme CSS variables. The export follows `prefers-color-scheme`, with a toggle.
 
 ### 3.5 vscode-extension
 
-- Commands: `Scan workspace`, `Open architecture map`, `Export (HTML/JSON)`, `Configure AI provider`.
-- Runs analysis in a worker thread with progress notification and cancellation.
-- Click on node → opens file at line.
-- Re-scan on save (debounced, incremental).
-- Export: single self-contained `architecture.html` (viewer + inlined model) or `model.json`; option to strip file paths.
+- **Commands:** `Scan workspace`, `Open architecture map`, `Export (HTML/JSON)`, `Configure AI provider`.
+- **Analysis process:** analysis runs in a child process (see 3.2 budget), with a progress notification and cancellation (the process is killed).
+- **Navigation:** clicking a node opens the file at that line.
+- **Re-scan:** on save, the affected service is re-scanned (debounced, see 3.2).
+- **Export:**
+  - Output is either a single self-contained `architecture.html` (viewer plus inlined model) or `model.json`.
+  - **File paths are stripped by default.** Including them is an opt-in checkbox.
+  - Before writing, the export dialog lists what the file contains: service, route, table, column, middleware and external host names.
+- **Activation:** `onCommand:*` only. There is no automatic scan when a workspace opens.
+- **Workspace Trust:** `untrustedWorkspaces: { supported: 'limited' }`. Analysis is allowed because it never executes repo code; AI is disabled. Virtual workspaces are unsupported.
+- **Packaging:**
+  - esbuild bundles the extension host code, with `typescript` bundled so analysis never uses the repo's own version.
+  - `vsce package --no-dependencies` produces the VSIX.
+  - VSIX target ≤ 15 MB.
+- **No telemetry.**
+
+### 3.7 Configuration
+
+VS Code settings (`archmap.*`) and an optional `archmap.config.json` at the workspace root share one schema, so the CLI and the extension behave the same. The file overrides settings.
+
+| Key | Default | Purpose |
+|---|---|---|
+| `include` / `exclude` | `["**"]` / `["**/node_modules/**", "**/dist/**", "**/build/**", "**/.next/**", "**/*.test.*", "**/*.spec.*"]` | Files analyzed |
+| `services` | auto | Explicit service roots and optional per-service `tsconfig` |
+| `serviceHosts` | `{}` | Host → service id, for cross-service edges |
+| `detectors` | all on | Enable or disable detectors by name |
+| `maxDepth` | 8 | Call-chain depth |
+| `moduleDepth` | 2 | Module-graph folder granularity |
+| `maxVisibleNodes` | 300 | Collapse threshold |
+| `analyzerMemoryMb` | 2048 | Child process heap |
+| `export.includePaths` | false | Keep file paths in exports |
+| `ai.provider` / `ai.model` / `ai.baseUrl` | none / provider default / localhost for Ollama | AI settings (keys live in SecretStorage, never in the file) |
+| `ai.includeSnippets` | true | Send code snippets or the model only |
+| `ai.maxContextTokens` | 12000 | Payload cap |
+
+### 3.8 Privacy & data inventory
+
+| Data | Read | Stored | In export | Sent to AI |
+|---|---|---|---|---|
+| Source code (non-`.env`) | Yes, in memory | No | No | Only snippets, only on confirm, only if `includeSnippets` |
+| `.env*` files | Never | No | No | No |
+| Names (services, routes, functions, tables, columns, hosts) | Yes | Model in extension storage | Yes | Yes (model slice) |
+| File paths and lines | Yes | Model, workspace-relative | Only if `export.includePaths` | Yes (relative) |
+| Secret-looking literals | Detected | Redacted | Redacted | Redacted |
+| API keys | — | VS Code SecretStorage | No | Sent only as auth to the chosen provider |
+| Telemetry | — | — | — | None collected |
+
+"Source never leaves the machine" holds by default. The only exception is AI with snippets, which the user explicitly opts into for each request through the preview.
 
 ### 3.6 cli
 
