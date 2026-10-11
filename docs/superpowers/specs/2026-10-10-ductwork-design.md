@@ -2,7 +2,7 @@
 
 Date: 2026-10-10
 Status: Revised after review and re-ordered for startup validation (2026-10-11), awaiting user approval
-Name: **Ductwork** (npm `ductwork` available; repo github.com/jigabarda/ductwork). VS Code Marketplace and domain availability to verify in M6.
+Name: **Ductwork** (npm `ductwork` available; repo github.com/jigabarda/ductwork). VS Code Marketplace and domain availability to verify in M8.
 
 ## 1. Purpose
 
@@ -504,6 +504,9 @@ Published to npm as `ductwork` (`npx ductwork …`).
 - **Privacy invariant:** a test confirms that exported HTML/JSON contain no function bodies or string literals from fixture source, apart from names and redacted hosts.
 - **Extension:** a `@vscode/test-electron` integration test covers scan, open map and click-to-code.
 - **Explainer:** template snapshot tests, AI adapters tested with mocked HTTP, and redaction unit tests.
+- **Diff and rules:** fixture model pairs (before/after) for every rule, including the case where an anonymous function moves, which must not count as a change. `ductwork check` is tested end-to-end on a fixture git repo with two commits.
+- **MCP server:** each tool is tested against a fixture model with the MCP SDK client over stdio. Responses must contain no source text.
+- **CLI:** exit codes, `--html` output passes the export safety tests, and `.ductwork/.gitignore` is created.
 
 **Acceptance for success criterion 1 ("correctly maps")**
 
