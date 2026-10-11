@@ -1,7 +1,7 @@
 # archmap — Backend Architecture Visualizer & Explainer (Design)
 
 Date: 2026-10-10
-Status: Draft, awaiting review
+Status: Revised after review (2026-10-11), awaiting user approval
 Name: `archmap` is a placeholder; final product name decided later.
 
 ## 1. Purpose
@@ -47,6 +47,7 @@ packages/
   vscode-extension/  commands, webview host, click-to-code, SecretStorage
   cli/               `archmap scan --out model.json` (CI, tests)
 fixtures/            small sample backends + expected model snapshots
+golden/              (private) expected results for author repos, accuracy script
 ```
 
 **The Architecture Model is the contract.** Analyzers produce it; viewer and explainer consume it. A future `analyzer-py` emits the same model; nothing downstream changes.
@@ -259,7 +260,7 @@ type WrapperMatch = { kind: 'wrapper'; unwrapArg: number };   // e.g. asyncHandl
 
 - The model is validated against the schema and written to the extension's per-workspace storage folder (`context.storageUri`), not into the repo.
 - The CLI writes it to `--out`.
-- `.env*` files are never read.
+- `.env*` files are never read. The redactor (see 3.3) runs on every literal string stored in the model (external hosts, queue names, meta).
 
 #### Re-scan (v1: not truly incremental)
 
@@ -347,7 +348,7 @@ Views:
   - VSIX target ≤ 15 MB.
 - **No telemetry.**
 
-### 3.7 Configuration
+### 3.6 Configuration
 
 VS Code settings (`archmap.*`) and an optional `archmap.config.json` at the workspace root share one schema, so the CLI and the extension behave the same. The file overrides settings.
 
@@ -366,7 +367,7 @@ VS Code settings (`archmap.*`) and an optional `archmap.config.json` at the work
 | `ai.includeSnippets` | true | Send code snippets or the model only |
 | `ai.maxContextTokens` | 12000 | Payload cap |
 
-### 3.8 Privacy & data inventory
+### 3.7 Privacy & data inventory
 
 | Data | Read | Stored | In export | Sent to AI |
 |---|---|---|---|---|
@@ -380,52 +381,96 @@ VS Code settings (`archmap.*`) and an optional `archmap.config.json` at the work
 
 "Source never leaves the machine" holds by default. The only exception is AI with snippets, which the user explicitly opts into for each request through the preview.
 
-### 3.6 cli
+### 3.8 cli
 
 - `archmap scan [dir] --out model.json` — reuses analyzer-ts. Used for CI smoke tests and fixtures; usable by anyone.
 
 ## 4. Data flow
 
 1. User runs **Scan workspace**.
-2. Extension discovers services and starts the analyzer in a worker.
-3. Detectors run per service: frameworks → data → outbound → async → imports.
-4. Call-chain resolution builds request flows.
-5. Partial models are merged, validated against the schema, written to `.archmap/model.json`.
-6. Webview receives the model and renders the views.
-7. Node click → extension opens source location.
-8. Node select → template explanation; optional AI via preview-and-confirm.
-9. Export writes the standalone HTML or JSON.
+2. Extension spawns the analyzer child process with the resolved config.
+3. Analyzer discovers packages, classifies services and libraries, and loads one ts-morph `Project`.
+4. Phase 1: every applicable detector runs `discover` independently. Results are merged by the merge rules.
+5. Phase 2: call-chain resolution builds flows from route and worker roots, using memoized function summaries and detector `classifyCall`.
+6. The model is redacted, validated against the schema and written to extension storage. The scan report is shown.
+7. The webview receives the model and renders the views.
+8. Clicking a node makes the extension open the source location.
+9. Selecting a node shows the template explanation and glossary. AI is optional, through preview-and-confirm.
+10. Export writes the standalone HTML or JSON (paths stripped by default).
+11. On save, the affected service is re-scanned and its slice of the model is replaced.
 
 ## 5. Error handling and limits
 
-- **Confidence on every edge**; unresolved shown honestly, never guessed.
-- **Detector isolation**: a throwing detector is logged and skipped; other results still render. Scan report shows per-detector status.
-- **Big repos**: worker thread, progress, cancel; collapsed graphs above ~300 nodes.
-- **Secrets**: `.env*` never read; AI payload redaction; explicit preview before send.
-- **AI failures** (bad key, rate limit, Ollama down): inline error; template explanation remains.
-- **Unsupported stack**: still produce module graph; report lists unsupported frameworks detected.
-- **Schema validation failure** on merge: surface as scan error with details, do not render a corrupt model.
+- **Confidence:** every edge and step carries a confidence. Unresolved ones are shown honestly, never guessed.
+- **Detector isolation:** a detector that throws in `discover` or `classifyCall` is logged and disabled for the rest of the scan. Other results still render, and the scan report shows per-detector status.
+- **Big repos:**
+  - Analysis runs in a child process with a memory cap, a progress bar and cancellation.
+  - When the budget is exceeded, the analyzer returns a partial model with `limitsHit`, and the UI shows a banner.
+  - Graphs over `maxVisibleNodes` collapse.
+- **Analyzer crash or OOM:** the extension reports the failure, keeps the last good model, and suggests raising `analyzerMemoryMb` or narrowing `include`.
+- **Secrets:** `.env*` is never read. The model and AI payloads are redacted (best-effort), and AI requires a preview first.
+- **AI failures** (bad key, rate limit, Ollama down, non-loopback host): an inline error is shown and the template explanation stays.
+- **Unsupported stack:** the module graph is still produced, and the report lists unsupported frameworks detected.
+- **Schema validation failure:** shown as a scan error with details. A corrupt model is never rendered.
+- **Export with a newer schema major version than the viewer:** shows a "made with a newer version" message.
 
-## 6. Testing
+## 6. Testing and acceptance
 
-- **Detector fixtures** (TDD): small sample apps per detector (Express+Prisma, NestJS, Next.js+Drizzle, Fastify+BullMQ, ...) with expected `model.json` snapshots.
-- **Real-repo smoke** (CI): CLI runs on 2–3 pinned public OSS repos; assert completion, node/edge count ranges, and time budget.
-- **Viewer**: component tests rendering fixture models; one Playwright test against an exported HTML.
-- **Extension**: `@vscode/test-electron` integration test — scan, open map, click-to-code.
-- **Explainer**: template snapshot tests; AI adapters tested with mocked HTTP; redaction unit tests.
+**Tests**
+
+- **Detector fixtures (TDD):**
+  - Each detector has small sample apps with expected `model.json` snapshots.
+  - Each framework fixture **must include nested mounts/prefixes, global and router middleware, and a wrapper (`asyncHandler`)**.
+  - NestJS fixtures include `useClass`/`@Inject(TOKEN)` providers.
+  - Next.js fixtures cover every path-derivation rule.
+- **Resolver tests:** cycles, depth truncation, interfaces with one or several implementations, callbacks, branches (if/try/loop), sibling order, `node_modules` stop.
+- **Real-repo smoke (CI):** the CLI runs on 2–3 pinned public OSS repos. The test checks:
+  - the scan completes
+  - node and edge counts stay within ±10% of a recorded baseline
+  - the run stays within the 3.2 budget (≤ 60 s per 1,000-file service on the CI runner)
+- **Viewer:** component tests render fixture models. One Playwright test runs against an exported HTML and includes a model containing `</script>` and `<img onerror>` in names, to confirm they are not executed.
+- **Privacy invariant:** a test confirms that exported HTML/JSON contain no function bodies or string literals from fixture source, apart from names and redacted hosts.
+- **Extension:** a `@vscode/test-electron` integration test covers scan, open map and click-to-code.
+- **Explainer:** template snapshot tests, AI adapters tested with mocked HTTP, and redaction unit tests.
+
+**Acceptance for success criterion 1 ("correctly maps")**
+
+Hand-written golden expectations for the author's repos (Pingward first, then Safeship) are checked in as a private test script. Targets:
+
+- 100% route recall, with correct method and full path
+- 100% of tables and relations
+- 100% of external services
+- ≥ 90% of sink edges present across 10 hand-picked key flows
+- 0 false sinks
 
 ## 7. Scope
 
 ### In v1
 
-- 4 views; Express, Fastify, NestJS, Next.js API; Prisma, Drizzle; fetch/axios/known SDKs; BullMQ, Redis; imports graph
-- Template explanations; optional AI (Claude, OpenAI, Ollama)
-- HTML/JSON export; CLI; VS Code Marketplace release
+- 4 views; Express, Fastify, NestJS and Next.js API, with middleware and route composition; Prisma and Drizzle; fetch/axios/known SDKs; BullMQ and Redis; imports graph
+- Template explanations with glossary; optional AI (Claude, OpenAI, Ollama)
+- HTML/JSON export; CLI; configuration; VS Code Marketplace release (MIT license)
+
+### Milestones (each gets its own implementation plan)
+
+The order tackles the riskiest part, call-chain accuracy, first.
+
+1. **M1 Core + Express/Prisma:**
+   - core-model types and schema, analyzer skeleton, service discovery, two-phase detector contract, call-chain resolver, CLI
+   - `express` and `prisma` detectors
+   - **Exit gate:** fixtures pass, and the golden accuracy check passes on Pingward (if Pingward isn't Express/Prisma, on whichever author repo is).
+2. **M2 Viewer (standalone):** system map, request flow, ERD and module graph rendered from fixture models; standalone HTML export with safe embedding.
+3. **M3 VS Code extension:** scan command and child process, webview with CSP, click-to-code, export, re-scan on save, config.
+4. **M4 Remaining detectors:** fastify, nestjs (with DI), nextjs-api, drizzle, http/SDKs with cross-service matching, bullmq, redis, imports cycles. **Exit gate:** golden check on Safeship.
+5. **M5 Explainer:** templates and glossary, then the AI adapters (Claude, OpenAI, Ollama) with payload builder, redaction and preview.
+6. **M6 Release:** packaging, Workspace Trust, README with screenshots, Marketplace listing, final name check.
 
 ### Later (not v1)
 
-- v1.1: **Guided tours / teaching mode** — step-by-step walkthroughs of a request flow
-- Python analyzer (FastAPI, Django, Flask, SQLAlchemy), then Go, Java
+- v1.1: **Guided tours / teaching mode**, with step-by-step walkthroughs of a request flow
+- Fine-grained incremental analysis
+- Python analyzer (FastAPI, Django, Flask, SQLAlchemy), then Go and Java
+- tRPC, GraphQL, TypeORM and Mongoose detectors
 - Hosted share links, accounts, team spaces
 - Architecture diff between commits/PRs
 - JetBrains plugin, desktop app, mobile viewer
