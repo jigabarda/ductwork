@@ -53,14 +53,105 @@ fixtures/            small sample backends + expected model snapshots
 
 ### 3.1 core-model
 
-- Versioned JSON (`schemaVersion`), validated by a JSON schema.
-- **Nodes**: `service`, `route`, `handler`, `function`, `module`, `db-table`, `external-api`, `queue`, `cache`.
-  - Common fields: `id` (stable, derived from kind + qualified name), `kind`, `name`, `serviceId`, `location?: { file, line }`, `meta` (kind-specific, e.g. route `method`/`path`, table `columns`).
-- **Edges**: `calls`, `imports`, `reads`, `writes`, `relates-to` (FK/relations), `publishes`, `consumes`, `handles` (route → handler).
-  - Fields: `from`, `to`, `kind`, `confidence: certain | inferred | unresolved`, `location?`.
-- **Flows**: per route, an ordered list of steps (node id + edge kind + depth) used by the request-flow view.
-- **Scan report**: detectors run, counts, errors, unsupported frameworks detected.
-- **Never contains source code** — only names, paths, line numbers, and structural metadata.
+Versioned JSON validated by a JSON schema generated from these TypeScript types. **Never contains source code** — only names, workspace-relative paths, line numbers, and structural metadata.
+
+```ts
+type Confidence = 'certain' | 'inferred' | 'unresolved';
+type Location = { file: string /* workspace-relative, '/' separators */; line: number };
+
+interface ArchModel {
+  schemaVersion: string;          // semver, see "Versioning" below
+  generatedAt: string;            // ISO timestamp
+  nodes: Node[];
+  edges: Edge[];
+  flows: Flow[];
+  report: ScanReport;
+}
+
+type NodeKind =
+  | 'service' | 'library'         // library = workspace package with no detected entrypoint/routes
+  | 'route' | 'middleware' | 'handler' | 'function'
+  | 'module'                      // folder (granularity per config) or NestJS @Module
+  | 'db-table' | 'external-api' | 'queue' | 'cache';
+
+interface Node {
+  id: string;                     // see "ID grammar"
+  kind: NodeKind;
+  name: string;
+  serviceId: string | null;       // null for global nodes (external-api, shared db)
+  location?: Location;
+  meta: NodeMeta;                 // discriminated by kind, below
+}
+
+// Kind-specific meta
+type RouteMeta = { method: string; fullPath: string; pathConfidence: Confidence; framework: string };
+type MiddlewareMeta = { scope: 'global' | 'router' | 'route'; role?: 'auth' | 'validation' | 'rate-limit' | 'cors' | 'logging' | 'error' | 'other' };
+type TableMeta = {
+  source: 'prisma' | 'drizzle';
+  columns: { name: string; type: string; nullable: boolean; isPrimaryKey: boolean; isUnique: boolean; default?: string; isGenerated?: boolean }[];
+  enums?: { name: string; values: string[] }[];
+  indexes?: { columns: string[]; unique: boolean }[];
+};
+type ExternalApiMeta = { provider?: string /* 'stripe' */; host?: string; matchedServiceId?: string /* cross-service call */ };
+type QueueMeta = { queueName: string; nameConfidence: Confidence };
+type CacheMeta = { client: 'ioredis' | 'redis'; connectionLabel: string };  // one node per client instance, not per key
+
+type EdgeKind = 'calls' | 'imports' | 'reads' | 'writes' | 'relates-to' | 'publishes' | 'consumes' | 'handles' | 'uses-middleware';
+
+interface Edge {
+  id: string;
+  from: string; to: string;
+  kind: EdgeKind;
+  confidence: Confidence;
+  location?: Location;            // call site
+  meta?: { fromColumns?: string[]; toColumns?: string[]; cardinality?: '1-1' | '1-n' | 'n-m'; onDelete?: string }; // relates-to
+}
+
+// Request flow = a call tree, not a flat list
+interface Flow {
+  routeId: string;
+  rootStepId: string;
+  steps: Step[];
+}
+interface Step {
+  id: string;
+  parentId: string | null;
+  nodeId: string;                 // middleware, handler, function, or sink (db-table/external-api/queue/cache)
+  edgeKind: EdgeKind;             // how the parent reached this node
+  phase: 'middleware' | 'handler';
+  order: number;                  // source order among siblings
+  callSite?: Location;
+  confidence: Confidence;
+  branch?: { kind: 'cond' | 'try' | 'catch' | 'loop'; label?: string };
+  truncated?: 'depth' | 'cycle' | 'node_modules';
+}
+
+interface ScanReport {
+  services: { id: string; role: 'service' | 'library'; durationMs: number }[];
+  detectors: { name: string; status: 'ok' | 'skipped' | 'error'; error?: string; counts: Record<string, number> }[];
+  unsupportedFrameworks: string[];  // from package.json allowlist, e.g. koa, hapi, trpc, graphql, typeorm, sequelize, mongoose
+  limitsHit: { kind: 'depth' | 'budget-time' | 'budget-memory' | 'max-nodes'; detail: string }[];
+}
+```
+
+**Flow contents.** A flow keeps the **full call tree pruned to subtrees that reach a sink** (db-table, external-api, queue, cache), so the intermediate business functions stay visible. Middleware steps come first, in registration order. Depth counts function hops from the handler (middleware are depth 0).
+
+**ID grammar** (stable across re-scans as long as the symbol isn't renamed or moved):
+
+| Kind | ID |
+|---|---|
+| service / library | `svc:{relPackageDir}` |
+| route | `route:{serviceId}:{METHOD} {fullPath}` |
+| handler / function / middleware | `fn:{serviceId}:{relFile}#{symbolPath}` (e.g. `OrdersService.create`) |
+| anonymous function | `fn:{serviceId}:{relFile}#anon@{line}:{col}` — explicitly unstable |
+| module | `mod:{serviceId}:{relDir}` or `mod:{serviceId}:nest:{ModuleClass}` |
+| db-table | `table:{datasourceLabel}:{tableName}` |
+| external-api | `ext:{provider}` or `ext:host:{host}` |
+| queue | `queue:{queueName}` (dynamic name → `queue:unresolved@{relFile}:{line}`) |
+| cache | `cache:{serviceId}:{connectionLabel}` |
+| edge | `{kind}:{from}->{to}` (+ `@{line}` when multiple call sites) |
+
+**Versioning.** `schemaVersion` is semver. Minor = additive fields; major = breaking. The viewer ships migrations so newer viewers read older exports; an export with a newer *major* than the viewer shows a "made with a newer version" message instead of rendering.
 
 ### 3.2 analyzer-ts
 
