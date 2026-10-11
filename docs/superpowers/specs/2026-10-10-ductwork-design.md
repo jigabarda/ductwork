@@ -1,7 +1,7 @@
 # Ductwork — Backend Architecture Visualizer & Explainer (Design)
 
 Date: 2026-10-10
-Status: Revised after review (2026-10-11), awaiting user approval
+Status: Revised after review and re-ordered for startup validation (2026-10-11), awaiting user approval
 Name: **Ductwork** (npm `ductwork` available; repo github.com/jigabarda/ductwork). VS Code Marketplace and domain availability to verify in M6.
 
 ## 1. Purpose
@@ -15,18 +15,20 @@ Audiences (all in scope):
 - **Teams** — architecture docs generated from code, shareable.
 - **Teaching** — explain backend concepts using real code.
 
-### Success criteria for v1
+### Success criteria
 
-1. Correctly maps the author's own Node/TS backends (e.g. Pingward, Safeship): routes, DB tables, external services, request flows match reality on manual review.
-2. Published free on the VS Code Marketplace.
-3. Polished enough to be a portfolio piece.
+1. **Accuracy:** correctly maps the author's own backends, Pingward and Safeship (both Next.js + Prisma). This is measured by the golden-file targets in section 6.
+2. **Demand validated (M2 gate):** see section 8 for the metrics. If the gate fails, we pivot or stop before building M3+.
+3. **Revenue path:** at least 3 design-partner teams use PR architecture checks (M4) on a private repo.
+4. **Distribution:** free CLI, MCP server and VS Code extension published (npm, Marketplace).
 
 ## 2. Key decisions
 
 | Decision | Choice | Why |
 |---|---|---|
 | Privacy model | **Local-first**: analysis runs on the user's machine; source never leaves it | Safest; works on private code without repo access |
-| First surface | **VS Code extension** | Developers already work there; enables click-to-code |
+| First surface | **CLI + standalone HTML export** (validation build), then MCP server, PR checks, and the **VS Code extension** | The CLI is the fastest way to put maps of real repos in front of people; the extension is the daily-use surface |
+| Business model | **Open core**: free MIT CLI, extension and MCP server; paid PR architecture checks for private repos and teams | The free tools bring developers in; teams pay for checks in their workflow, not for diagrams (see section 8) |
 | Sharing | **Export** self-contained HTML / JSON containing the model only (no source) | Shareable without a backend; hosted links later |
 | v1 language | **Node/TypeScript only**; Python next | Author's projects are TS; best tooling; detector interface keeps it pluggable |
 | Analysis engine | **TypeScript compiler via ts-morph** + per-framework detectors | Type info resolves real call chains → accurate request flows |
